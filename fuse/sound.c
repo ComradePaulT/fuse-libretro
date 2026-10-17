@@ -55,6 +55,7 @@ int sound_stereo_ay = SOUND_STEREO_AY_NONE; /* local copy of settings_current.st
  */
 #define AMPL_BEEPER		( 50 * 256)
 #define AMPL_TAPE		( 2 * 256 )
+int sound_tape_boost = 1;
 #define AMPL_AY_TONE		( 24 * 256 )	/* three of these */
 
 /* max. number of sub-frame AY port writes allowed;
@@ -830,6 +831,9 @@ sound_beeper( libspectrum_dword at_tstates, int on )
   }
 
   val = beeper_ampl[on];
+  if( sound_tape_boost && tape_is_playing() && settings_current.sound_load &&
+      !machine_current->timex && ( on & 0x01 ) && !( on & 0x02 ) )
+    val = AMPL_BEEPER;
 
   blip_synth_update( left_beeper_synth, at_tstates, val );
   if( sound_stereo_ay != SOUND_STEREO_AY_NONE )

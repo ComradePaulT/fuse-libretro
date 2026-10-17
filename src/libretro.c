@@ -1,6 +1,7 @@
 #include <libretro.h>
 #include <streams/file_stream.h>
 #include <keyboverlay.h>
+#include <tapedeck.h>
 
 #include <coreopt.h>
 #include <stddef.h>
@@ -27,6 +28,7 @@
 #include <periph.h>
 #include <sound.h>
 #include <snapshot.h>
+#include <tape.h>
 #include <timer/timer.h>
 
 #include "ui/uimedia.h"
@@ -105,6 +107,7 @@ static const machine_t machine_list[] =
 #define MACHINE_IDX_48      0
 #define MACHINE_IDX_48_NTSC 1
 #define MACHINE_IDX_128     2
+#define MACHINE_IDX_PLUS3   5
 #define MACHINE_IDX_TS2068  10
 #define MACHINE_IDX_16      11
 
@@ -119,6 +122,31 @@ static int machine_idx_is_48k_class(int idx)
 {
    return idx == MACHINE_IDX_48 || idx == MACHINE_IDX_48_NTSC ||
           idx == MACHINE_IDX_16;
+}
+
+static int suffix_ci(const char *path, const char *suffix)
+{
+   size_t n, m, i;
+   if (!path) return 0;
+   n = strlen(path); m = strlen(suffix);
+   if (n < m) return 0;
+   for (i = 0; i < m; ++i)
+      if (tolower((unsigned char)path[n-m+i]) !=
+          tolower((unsigned char)suffix[i])) return 0;
+   return 1;
+}
+
+static int content_is_plus3_disk(const struct retro_game_info *info)
+{
+   const unsigned char *bytes;
+   if (!info || !info->data || !info->size) return 0;
+   if (suffix_ci(info->path, ".dsk") || suffix_ci(info->path, ".ipf"))
+      return 1;
+   bytes = (const unsigned char *)info->data;
+   return (info->size >= 34 &&
+           (!memcmp(bytes, "MV - CPCEMU Disk-File", 20) ||
+            !memcmp(bytes, "EXTENDED CPC DSK File", 21))) ||
+          (info->size >= 4 && !memcmp(bytes, "CAPS", 4));
 }
 
 #define BGR16(color) rgb32_to_bgr16(color)
@@ -249,6 +277,8 @@ static uint16_t palettes[PALETTE_COUNT][16] = {
 static int fuse_init_called = 0;
 static int forced_machine_at_init = 0;
 static int forced_machine_idx = 0;
+/* Track the option separately from a machine forced by loaded content. */
+static int last_machine_option = -1;
 static int auto_size_savestate = 1;
 
 static unsigned msg_interface_version = 0;
@@ -307,10 +337,8 @@ static double frame_time;
 static cheat_t* active_cheats;
 static int current_palette = PALETTE_FUSE;
 
-// Multi-disk (M3U) support: a single virtual tray for drive A, swappable at
-// runtime via the libretro disk control interface. See retro_load_game()
-// (M3U parsing), disk_control_insert_current() and the
-// retro_disk_control_ext_callback implementation below.
+// Multi-side media support: RetroArch's disk control interface also serves
+// cassette sides. A playlist contains either tapes or disks, in play order.
 #define MAX_DISK_IMAGES 16
 #define MAX_DISK_PATH_LEN 1024
 
@@ -591,7 +619,7 @@ static struct retro_core_option_v2_category core_option_categories[] = {
 static struct retro_core_option_v2_definition core_option_definitions[] = {
    {
       "fuse_machine",
-      "Model (needs content load)",
+      "Model",
       NULL,
       NULL,
       NULL,
@@ -697,21 +725,21 @@ static struct retro_core_option_v2_definition core_option_definitions[] = {
       "fuse_auto_load",
       "Tape Auto Load",
       NULL,
-      NULL,
+      "Disabled leaves the machine at its normal startup screen so you can type LOAD and press PLAY yourself.",
       NULL,
       "system",
       { CORE_OPTION_VALUE_LIST_ENABLED_DISABLED },
-      "enabled"
+      "disabled"
    },
    {
       "fuse_fast_load",
       "Tape Fast Load",
       NULL,
-      NULL,
+      "Disabled preserves real-time tape pulses, loading stripes, and protection timing.",
       NULL,
       "advanced",
       { CORE_OPTION_VALUE_LIST_ENABLED_DISABLED },
-      "enabled"
+      "disabled"
    },
    {
       "fuse_load_sound",
@@ -722,6 +750,16 @@ static struct retro_core_option_v2_definition core_option_definitions[] = {
       "audio",
       { CORE_OPTION_VALUE_LIST_ENABLED_DISABLED },
       "enabled"
+   },
+   {
+      "fuse_tape_volume",
+      "Tape Loading Volume",
+      NULL,
+      "Matched raises cassette loading noise to the beeper's nominal level without changing the signal seen by the Spectrum.",
+      NULL,
+      "audio",
+      { { "matched", "Matched to game sound" }, { "original", "Original Fuse level" }, { NULL, NULL } },
+      "matched"
    },
    {
       "fuse_speaker_type",
@@ -1039,14 +1077,15 @@ static struct retro_core_options_v2 core_options_v2 = {
 
 static const struct retro_variable core_vars[] =
 {
-   { "fuse_machine", "Model (needs content load); Spectrum 48K|Spectrum 48K (NTSC)|Spectrum 128K|Spectrum +2|Spectrum +2A|Spectrum +3|Spectrum +3e|Spectrum SE|Timex TC2048|Timex TC2068|Timex TS2068|Spectrum 16K|Pentagon 128K|Pentagon 512K|Pentagon 1024|Scorpion 256K" },
+   { "fuse_machine", "Model; Spectrum 48K|Spectrum 48K (NTSC)|Spectrum 128K|Spectrum +2|Spectrum +2A|Spectrum +3|Spectrum +3e|Spectrum SE|Timex TC2048|Timex TC2068|Timex TS2068|Spectrum 16K|Pentagon 128K|Pentagon 512K|Pentagon 1024|Scorpion 256K" },
    { "fuse_auto_machine", "Auto-select Model for 128K content (needs content load); disabled|enabled" },
    { "fuse_emulation_speed", "Emulation speed percentage (needs content load); 100|150|200|300|50"},
    { "fuse_size_border", "Size Video Border; full|medium|small|minimum|none" },
    { "fuse_palette", "Colour Palette; Fuse Standard|ZX Standard|B&W TV|Green Monochrome|Ambar Monochrome|C64|CGA 4 colours|CGA 8 colours|CGA 16 colours|Inverted colours"},
-   { "fuse_auto_load", "Tape Auto Load; enabled|disabled" },
-   { "fuse_fast_load", "Tape Fast Load; enabled|disabled" },
+   { "fuse_auto_load", "Tape Auto Load; disabled|enabled" },
+   { "fuse_fast_load", "Tape Fast Load; disabled|enabled" },
    { "fuse_load_sound", "Tape Load Sound; enabled|disabled" },
+   { "fuse_tape_volume", "Tape Loading Volume; matched|original" },
    { "fuse_speaker_type", "Speaker Type; tv speaker|beeper|unfiltered" },
    { "fuse_ay_stereo_separation", "AY Stereo Separation; none|acb|abc" },
    { "fuse_turbosound", "TurboSound (2x AY-8910); disabled|enabled" },
@@ -1146,14 +1185,15 @@ static void apply_border_size(int option)
 int update_variables(int force)
 {
    int flags = 0;
+   int selected_model = coreopt(env_cb, core_vars, "fuse_machine", NULL);
+   selected_model += selected_model < 0;
 
-   if (force)
+   if (force || selected_model != last_machine_option)
    {
-      // Only change the machine when reloading content
-      int option = coreopt(env_cb, core_vars, "fuse_machine", NULL);
-      option += option < 0;
+      int option = selected_model;
+      last_machine_option = selected_model;
 
-      if (forced_machine_at_init)
+      if (force && forced_machine_at_init)
          option = forced_machine_idx;
 
       const machine_t *new_machine = machine_list + option;
@@ -1167,11 +1207,8 @@ int update_variables(int force)
 
          settings_current.start_machine = utils_safe_strdup(new_machine->fuse_id);
 
-         if (machine == NULL || machine_id_is_60hz(new_machine->id) != machine_id_is_60hz(machine->id))
-         {
-            // region and fps change
-            flags |= UPDATE_AV_INFO;
-         }
+         /* PAL models also differ slightly in frame rate. */
+         flags |= UPDATE_AV_INFO;
 
          machine = new_machine;
          frame_time = 1000.0 / (machine_id_is_60hz(machine->id) ? 60.0 : 50.0);
@@ -1230,9 +1267,9 @@ int update_variables(int force)
       
    }
 
-   settings_current.auto_load = coreopt(env_cb, core_vars, "fuse_auto_load", NULL) != 1;
+   settings_current.auto_load = coreopt(env_cb, core_vars, "fuse_auto_load", NULL) == 1;
 
-   if (coreopt(env_cb, core_vars, "fuse_fast_load", NULL) == 0)
+   if (coreopt(env_cb, core_vars, "fuse_fast_load", NULL) == 1)
    {
       // Fastload enabled
       settings_current.fastload = 1;
@@ -1245,9 +1282,13 @@ int update_variables(int force)
       settings_current.accelerate_loader = 0;
       settings_current.tape_traps = 0;
       settings_current.slt_traps = 0;
+      /* Real-time playback must continue through custom/protected loaders
+         and must not be stopped by the heuristic loader detector. */
+      settings_current.detect_loader = 0;
    }
 
    settings_current.sound_load = coreopt(env_cb, core_vars, "fuse_load_sound", NULL) != 1;
+   sound_tape_boost = coreopt(env_cb, core_vars, "fuse_tape_volume", NULL) != 1;
 
    {
       int option = coreopt(env_cb, core_vars, "fuse_speaker_type", NULL);
@@ -1632,7 +1673,7 @@ static libspectrum_id_t identify_file_get_ext(const char* filename, const void* 
    return type;
 }
 
-// Parses an M3U playlist (one disk image path per line; blank lines and
+// Parses an M3U playlist (one media path per line; blank lines and
 // lines starting with '#' are skipped) into disk_image_paths[]. Relative
 // entries are resolved against the M3U file's own directory, since that's
 // the standard convention - RetroArch doesn't parse M3U content for the
@@ -1643,10 +1684,15 @@ static void parse_m3u(const char* m3u_path, const char* data, size_t size)
    char base_dir[MAX_DISK_PATH_LEN];
    const char* slash1 = strrchr(m3u_path, '/');
    const char* slash2 = strrchr(m3u_path, '\\');
-   const char* slash = slash1 > slash2 ? slash1 : slash2;
+   const char* slash = !slash1 ? slash2 : (!slash2 || slash1 > slash2 ? slash1 : slash2);
    size_t base_len = slash ? (size_t)(slash - m3u_path + 1) : 0;
    const char* p = data;
    const char* end = data + size;
+
+   // Windows editors commonly put a UTF-8 BOM before the first entry.
+   if (size >= 3 && (unsigned char)p[0] == 0xef &&
+       (unsigned char)p[1] == 0xbb && (unsigned char)p[2] == 0xbf)
+      p += 3;
 
    if (base_len >= sizeof(base_dir))
       base_len = sizeof(base_dir) - 1;
@@ -1707,32 +1753,55 @@ static void parse_m3u(const char* m3u_path, const char* data, size_t size)
    }
 }
 
-// Mounts disk_image_paths[current_disk_index] into whichever disk drive is
-// active for the current machine, without resetting it - used for runtime
-// disk swaps (as opposed to the initial content load, which does respect
-// the Tape Auto Load option and machine boot semantics).
+static bool media_path_is_tape(const char *path)
+{
+   return suffix_ci(path, ".tzx") || suffix_ci(path, ".tap") ||
+          suffix_ci(path, ".pzx") || suffix_ci(path, ".csw") ||
+          suffix_ci(path, ".wav") || suffix_ci(path, ".spc") ||
+          suffix_ci(path, ".sta") || suffix_ci(path, ".ltp");
+}
+
+// Insert the selected disk or tape without resetting the running machine.
+// Tape Auto Load applies only to the initial load, never a side swap.
 static bool disk_control_insert_current(void)
 {
    libspectrum_id_t type;
    int error;
+   const char *path;
 
    if (num_disk_images == 0 || current_disk_index >= num_disk_images)
-      return true; // "no disk" is a valid state, not a failure
+      return true; // "no media" is a valid state
+
+   path = disk_image_paths[current_disk_index];
+   if (!path[0])
+      return true; // Newly added, empty slot
 
    fuse_emulation_pause();
-   error = utils_open_file(disk_image_paths[current_disk_index], 0, &type);
+   error = utils_open_file(path, 0, &type);
    fuse_emulation_unpause();
    display_refresh_all();
+
+   if (!error && media_path_is_tape(path))
+      tapedeck_load_artwork(path, system_dir);
 
    return error == 0;
 }
 
-// Ejects whatever's currently in the active disk drive. Mirrors the
+// Eject the current tape or disk. The disk dispatch mirrors the
 // machine/peripheral dispatch utils_open_file() uses for its
 // LIBSPECTRUM_CLASS_DISK_GENERIC case, since at eject time there's no file
 // to identify a class from - only "whichever drive is live right now".
-static void disk_control_eject_current(void)
+static bool disk_control_eject_current(void)
 {
+   if (num_disk_images && current_disk_index < num_disk_images &&
+       media_path_is_tape(disk_image_paths[current_disk_index]))
+   {
+      if (tape_present() && tape_close())
+         return false;
+      tapedeck_load_artwork(NULL, NULL);
+      return true;
+   }
+
    if (machine_current->machine == LIBSPECTRUM_MACHINE_PLUS3 ||
        machine_current->machine == LIBSPECTRUM_MACHINE_PLUS2A)
       ui_media_drive_eject(UI_MEDIA_CONTROLLER_PLUS3, SPECPLUS3_DRIVE_A);
@@ -1750,6 +1819,8 @@ static void disk_control_eject_current(void)
       ui_media_drive_eject(UI_MEDIA_CONTROLLER_OPUS, OPUS_DRIVE_1);
    else if (periph_is_active(PERIPH_TYPE_DIDAKTIK80))
       ui_media_drive_eject(UI_MEDIA_CONTROLLER_DIDAKTIK, DIDAKTIK80_DRIVE_A);
+
+   return true;
 }
 
 static bool RETRO_CALLCONV disk_set_eject_state(bool ejected)
@@ -1759,13 +1830,16 @@ static bool RETRO_CALLCONV disk_set_eject_state(bool ejected)
 
    if (ejected)
    {
-      disk_control_eject_current();
+      if (!disk_control_eject_current())
+         return false;
       disk_tray_ejected = true;
       return true;
    }
 
+   if (!disk_control_insert_current())
+      return false;
    disk_tray_ejected = false;
-   return disk_control_insert_current();
+   return true;
 }
 
 static bool RETRO_CALLCONV disk_get_eject_state(void)
@@ -1841,7 +1915,7 @@ static bool RETRO_CALLCONV disk_set_initial_image(unsigned index, const char *pa
 
 static bool RETRO_CALLCONV disk_get_image_path(unsigned index, char *path, size_t len)
 {
-   if (index >= num_disk_images || disk_image_paths[index][0] == 0)
+   if (!path || !len || index >= num_disk_images || disk_image_paths[index][0] == 0)
       return false;
 
    strncpy(path, disk_image_paths[index], len - 1);
@@ -1853,12 +1927,13 @@ static bool RETRO_CALLCONV disk_get_image_label(unsigned index, char *label, siz
 {
    const char *slash1, *slash2, *base;
 
-   if (index >= num_disk_images || disk_image_paths[index][0] == 0)
+   if (!label || !len || index >= num_disk_images || disk_image_paths[index][0] == 0)
       return false;
 
    slash1 = strrchr(disk_image_paths[index], '/');
    slash2 = strrchr(disk_image_paths[index], '\\');
-   base = slash1 > slash2 ? slash1 + 1 : (slash2 ? slash2 + 1 : disk_image_paths[index]);
+   base = !slash1 ? (slash2 ? slash2 + 1 : disk_image_paths[index]) :
+          (!slash2 || slash1 > slash2 ? slash1 + 1 : slash2 + 1);
 
    strncpy(label, base, len - 1);
    label[len - 1] = 0;
@@ -2110,6 +2185,9 @@ bool retro_load_game(const struct retro_game_info *info)
 #endif
 
    enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_RGB565;
+   const int is_m3u = info && info->path && info->data && info->size &&
+                      suffix_ci(info->path, ".m3u");
+   const char *first_media_path = info ? info->path : NULL;
 
    if (!env_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt))
    {
@@ -2122,10 +2200,28 @@ bool retro_load_game(const struct retro_game_info *info)
    memset(keyb_state, 0, sizeof(keyb_state));
    hard_width = hard_height = soft_width = soft_height = 0;
    select_pressed = keyb_overlay = 0;
+   tapedeck_reset();
    keyb_x = keyb_y = 0;
    keyb_send = 0;
    snapshot_buffer = NULL;
    snapshot_size = 0;
+   num_disk_images = 0;
+   current_disk_index = 0;
+   disk_tray_ejected = false;
+   content_is_m3u = is_m3u;
+
+   // Parse before fuse_init() so a +3 disk playlist selects the +3 from
+   // boot, just like loading a standalone .dsk or .ipf file.
+   if (is_m3u)
+   {
+      parse_m3u(info->path, (const char *)info->data, info->size);
+      if (initial_disk_index_hint >= 0 &&
+          (unsigned)initial_disk_index_hint < num_disk_images &&
+          strcmp(disk_image_paths[initial_disk_index_hint], initial_disk_path_hint) == 0)
+         current_disk_index = (unsigned)initial_disk_index_hint;
+      if (num_disk_images > 0)
+         first_media_path = disk_image_paths[current_disk_index];
+   }
    /* Per-load state: a frontend may load new content without an intervening
       retro_deinit(), and these two survive it. Leaving them set meant that
       once a .dck had been loaded, every later load in that session stayed
@@ -2166,8 +2262,21 @@ bool retro_load_game(const struct retro_game_info *info)
 
       selected += selected < 0;
 
-      if (machine_idx_is_48k_class(selected) &&
-          content_wants_128k(info->path, info->data, info->size))
+      if ((content_is_plus3_disk(info) ||
+           (is_m3u && first_media_path &&
+            (suffix_ci(first_media_path, ".dsk") ||
+             suffix_ci(first_media_path, ".ipf")))) &&
+          selected != MACHINE_IDX_PLUS3)
+      {
+         forced_machine_at_init = 1;
+         forced_machine_idx = MACHINE_IDX_PLUS3;
+         log_cb(RETRO_LOG_INFO, "+3 disk detected, selecting Spectrum +3\n");
+         Retro_Msg("+3 disk: using Spectrum +3");
+      }
+      else if (machine_idx_is_48k_class(selected) &&
+           content_wants_128k(first_media_path,
+                              is_m3u ? NULL : info->data,
+                              is_m3u ? 0 : info->size))
       {
          int auto_machine = coreopt(env_cb, core_vars, "fuse_auto_machine", NULL);
 
@@ -2233,50 +2342,20 @@ bool retro_load_game(const struct retro_game_info *info)
          memcpy(tape_data, info->data, tape_size);
 
          const char* filename_load_game = info->path;
-         int is_m3u = 0;
-
-         // info->path may legitimately be NULL with need_fullpath=false;
-         // M3U content (and single-disk registration below) needs a real
-         // path, everything else falls back to content-based identify.
-         if (filename_load_game != NULL)
-         {
-            const char* m3u_ext = strrchr(filename_load_game, '.');
-            // Case-insensitive: frontends and users pass ".M3U" too, and
-            // falling through to identify would misread the playlist text
-            // as a raw disk image.
-            is_m3u = m3u_ext != NULL &&
-                     (m3u_ext[1] == 'm' || m3u_ext[1] == 'M') &&
-                      m3u_ext[2] == '3' &&
-                     (m3u_ext[3] == 'u' || m3u_ext[3] == 'U') &&
-                      m3u_ext[4] == 0;
-         }
-
-         num_disk_images = 0;
-         current_disk_index = 0;
-         disk_tray_ejected = false;
-         content_is_m3u = is_m3u;
 
          if (is_m3u)
          {
-            // An M3U's own bytes were never a disk image - parse it into
-            // the disk list instead of running it through the normal
-            // identify/load path (which would otherwise mistake the M3U
-            // text for a raw TRD image, see identify_file()'s fallback).
-            parse_m3u(filename_load_game, (const char*)tape_data, tape_size);
-
-            if (initial_disk_index_hint >= 0 &&
-                (unsigned)initial_disk_index_hint < num_disk_images &&
-                strcmp(disk_image_paths[initial_disk_index_hint], initial_disk_path_hint) == 0)
-            {
-               current_disk_index = (unsigned)initial_disk_index_hint;
-            }
-
+            // The M3U's bytes are playlist text, not an image. Paths were
+            // already parsed before fuse_init() for model detection.
             if (num_disk_images > 0)
             {
                libspectrum_id_t type;
+               const char *path = disk_image_paths[current_disk_index];
 
                fuse_emulation_pause();
-               utils_open_file(disk_image_paths[current_disk_index], settings_current.auto_load, &type);
+               if (!utils_open_file(path, settings_current.auto_load, &type) &&
+                   media_path_is_tape(path))
+                  tapedeck_load_artwork(path, system_dir);
                display_refresh_all();
                fuse_emulation_unpause();
             }
@@ -2297,6 +2376,13 @@ bool retro_load_game(const struct retro_game_info *info)
             {
                type = identify_file_get_ext(filename_load_game, tape_data, tape_size, &ext);
                libspectrum_identify_class(&class, type);
+            }
+
+            if (class == LIBSPECTRUM_CLASS_TAPE && filename_load_game)
+            {
+               const char *system_dir = NULL;
+               env_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &system_dir);
+               tapedeck_load_artwork(filename_load_game, system_dir);
             }
 
             char filename[32];
@@ -2361,11 +2447,11 @@ bool retro_load_game(const struct retro_game_info *info)
             display_refresh_all();
             fuse_emulation_unpause();
 
-            // Single disk image: still expose it through Disk Control, so
-            // a second disk can be added manually from the frontend's UI
-            // even without an M3U.
+            // Single tape or disk: expose it through Disk Control too, so
+            // a second side can be added without a playlist.
             if (filename_load_game != NULL &&
-               (class == LIBSPECTRUM_CLASS_DISK_PLUS3   || class == LIBSPECTRUM_CLASS_DISK_DIDAKTIK ||
+               (class == LIBSPECTRUM_CLASS_TAPE ||
+                class == LIBSPECTRUM_CLASS_DISK_PLUS3   || class == LIBSPECTRUM_CLASS_DISK_DIDAKTIK ||
                 class == LIBSPECTRUM_CLASS_DISK_PLUSD   || class == LIBSPECTRUM_CLASS_DISK_TRDOS     ||
                 class == LIBSPECTRUM_CLASS_DISK_OPUS    || class == LIBSPECTRUM_CLASS_DISK_GENERIC))
             {
@@ -2482,12 +2568,30 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
    info->geometry.max_width = MAX_WIDTH;
    info->geometry.max_height = MAX_HEIGHT;
    info->geometry.aspect_ratio = 0.0f;
-   info->timing.fps = machine_id_is_60hz(machine->id) ? 60.0 : 50.0;
+   /* Let RetroArch pace frames at the selected machine's actual interrupt
+      rate. A 128K frame is 70,908 T-states at 3,546,900 Hz, not exactly
+      20 ms; reporting 50.0 here introduces avoidable audio/video drift. */
+   if (machine) {
+      unsigned clock = libspectrum_timings_processor_speed(machine->id);
+      unsigned frame = libspectrum_timings_tstates_per_frame(machine->id);
+      info->timing.fps = frame ? (double)clock / (double)frame : 50.0;
+   } else {
+      info->timing.fps = 50.0;
+   }
    info->timing.sample_rate = 44100.0;
 }
 
 static void render_video(void)
 {
+   if (tapedeck_visible())
+   {
+      memcpy(image_buffer_2, image_buffer, sizeof(image_buffer_2));
+      tapedeck_draw(image_buffer_2 + first_pixel, hard_width,
+                    soft_width, soft_height);
+      video_cb(image_buffer_2 + first_pixel, soft_width, soft_height,
+               hard_width * sizeof(uint16_t));
+      return;
+   }
    if (!keyb_overlay)
    {
       video_cb(show_frame ? image_buffer + first_pixel : NULL, soft_width, soft_height, hard_width * sizeof(uint16_t));
@@ -3013,18 +3117,18 @@ void retro_reset(void)
 
    if (content_is_m3u)
    {
-      // tape_data holds the M3U's playlist text, not an image -
-      // re-identifying it here would misread it (possibly as a raw TRD).
-      // Reset means reboot with the currently selected disk inserted,
-      // mirroring the initial load; autoload forced like the normal
-      // reset path below.
-      if (num_disk_images > 0 && current_disk_index < num_disk_images)
+      // The M3U bytes are playlist text, not an image. Reopen the selected
+      // side after reset, but preserve manual tape loading and tray state.
+      if (!disk_tray_ejected && num_disk_images > 0 &&
+          current_disk_index < num_disk_images)
       {
+         const char *path = disk_image_paths[current_disk_index];
          fuse_emulation_pause();
-         utils_open_file(disk_image_paths[current_disk_index], 1, &type);
+         if (!utils_open_file(path, settings_current.auto_load, &type) &&
+             media_path_is_tape(path))
+            tapedeck_load_artwork(path, system_dir);
          display_refresh_all();
          fuse_emulation_unpause();
-         disk_tray_ejected = false;
       }
       else
       {

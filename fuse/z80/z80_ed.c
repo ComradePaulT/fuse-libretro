@@ -431,6 +431,9 @@
 	  contend_write_no_mreq( DE, 1 );
 	  PC-=2;
 	  z80.memptr.w = PC+1;
+	  F = ( F & ~( FLAG_3 | FLAG_5 ) ) |
+	      ( ( PC >> 8 ) & ( FLAG_3 | FLAG_5 ) );
+	  Q = F;
 	}
         HL++; DE++;
       }
@@ -457,6 +460,12 @@
 	  contend_read_no_mreq( HL, 1 );
 	  PC-=2;
 	  z80.memptr.w = PC+1;
+	  /* During the extra repeat cycles, bits 3 and 5 of F come from
+	     bits 11 and 13 of the repeated instruction's address.  This is
+	     visible if an interrupt arrives before the next iteration. */
+	  F = ( F & ~( FLAG_3 | FLAG_5 ) ) |
+	      ( ( PC >> 8 ) & ( FLAG_3 | FLAG_5 ) );
+	  Q = F;
 	} else {
 	  z80.memptr.w++;
 	}
@@ -485,6 +494,22 @@
 	  contend_write_no_mreq( HL, 1 ); contend_write_no_mreq( HL, 1 );
 	  contend_write_no_mreq( HL, 1 );
 	  PC -= 2;
+	  F = ( F & ~( FLAG_3 | FLAG_5 ) ) |
+	      ( ( PC >> 8 ) & ( FLAG_3 | FLAG_5 ) );
+	  {
+	    int parity_index;
+	    if( F & FLAG_C ) {
+	      if( initemp & 0x80 ) {
+	        parity_index = ( B - 1 ) & 7;
+	        if( ( B & 15 ) == 0 ) F |= FLAG_H; else F &= ~FLAG_H;
+	      } else {
+	        parity_index = ( B + 1 ) & 7;
+	        if( ( B & 15 ) == 15 ) F |= FLAG_H; else F &= ~FLAG_H;
+	      }
+	    } else parity_index = B & 7;
+	    if( !parity_table[ parity_index ] ) F ^= FLAG_P;
+	  }
+	  Q = F;
 	}
         HL++;
       }
@@ -512,6 +537,22 @@
 	  contend_read_no_mreq( BC, 1 ); contend_read_no_mreq( BC, 1 );
 	  contend_read_no_mreq( BC, 1 );
 	  PC -= 2;
+	  F = ( F & ~( FLAG_3 | FLAG_5 ) ) |
+	      ( ( PC >> 8 ) & ( FLAG_3 | FLAG_5 ) );
+	  {
+	    int parity_index;
+	    if( F & FLAG_C ) {
+	      if( outitemp & 0x80 ) {
+	        parity_index = ( B - 1 ) & 7;
+	        if( ( B & 15 ) == 0 ) F |= FLAG_H; else F &= ~FLAG_H;
+	      } else {
+	        parity_index = ( B + 1 ) & 7;
+	        if( ( B & 15 ) == 15 ) F |= FLAG_H; else F &= ~FLAG_H;
+	      }
+	    } else parity_index = B & 7;
+	    if( !parity_table[ parity_index ] ) F ^= FLAG_P;
+	  }
+	  Q = F;
 	}
       }
       break;
@@ -531,6 +572,9 @@
 	  contend_write_no_mreq( DE, 1 );
 	  PC-=2;
 	  z80.memptr.w = PC+1;
+	  F = ( F & ~( FLAG_3 | FLAG_5 ) ) |
+	      ( ( PC >> 8 ) & ( FLAG_3 | FLAG_5 ) );
+	  Q = F;
 	}
         HL--; DE--;
       }
@@ -557,6 +601,12 @@
 	  contend_read_no_mreq( HL, 1 );
 	  PC-=2;
 	  z80.memptr.w = PC+1;
+	  /* During the extra repeat cycles, bits 3 and 5 of F come from
+	     bits 11 and 13 of the repeated instruction's address.  This is
+	     visible if an interrupt arrives before the next iteration. */
+	  F = ( F & ~( FLAG_3 | FLAG_5 ) ) |
+	      ( ( PC >> 8 ) & ( FLAG_3 | FLAG_5 ) );
+	  Q = F;
 	} else {
 	  z80.memptr.w--;
 	}
@@ -585,6 +635,22 @@
 	  contend_write_no_mreq( HL, 1 ); contend_write_no_mreq( HL, 1 );
 	  contend_write_no_mreq( HL, 1 );
 	  PC -= 2;
+	  F = ( F & ~( FLAG_3 | FLAG_5 ) ) |
+	      ( ( PC >> 8 ) & ( FLAG_3 | FLAG_5 ) );
+	  {
+	    int parity_index;
+	    if( F & FLAG_C ) {
+	      if( initemp & 0x80 ) {
+	        parity_index = ( B - 1 ) & 7;
+	        if( ( B & 15 ) == 0 ) F |= FLAG_H; else F &= ~FLAG_H;
+	      } else {
+	        parity_index = ( B + 1 ) & 7;
+	        if( ( B & 15 ) == 15 ) F |= FLAG_H; else F &= ~FLAG_H;
+	      }
+	    } else parity_index = B & 7;
+	    if( !parity_table[ parity_index ] ) F ^= FLAG_P;
+	  }
+	  Q = F;
 	}
         HL--;
       }
@@ -612,6 +678,22 @@
 	  contend_read_no_mreq( BC, 1 ); contend_read_no_mreq( BC, 1 );
 	  contend_read_no_mreq( BC, 1 );
 	  PC -= 2;
+	  F = ( F & ~( FLAG_3 | FLAG_5 ) ) |
+	      ( ( PC >> 8 ) & ( FLAG_3 | FLAG_5 ) );
+	  {
+	    int parity_index;
+	    if( F & FLAG_C ) {
+	      if( outitemp & 0x80 ) {
+	        parity_index = ( B - 1 ) & 7;
+	        if( ( B & 15 ) == 0 ) F |= FLAG_H; else F &= ~FLAG_H;
+	      } else {
+	        parity_index = ( B + 1 ) & 7;
+	        if( ( B & 15 ) == 15 ) F |= FLAG_H; else F &= ~FLAG_H;
+	      }
+	    } else parity_index = B & 7;
+	    if( !parity_table[ parity_index ] ) F ^= FLAG_P;
+	  }
+	  Q = F;
 	}
       }
       break;

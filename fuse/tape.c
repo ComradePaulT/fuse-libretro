@@ -317,7 +317,11 @@ tape_select_block( size_t n )
 int
 tape_select_block_no_update( size_t n )
 {
-  return libspectrum_tape_nth_block( tape, n );
+  int error = libspectrum_tape_nth_block( tape, n );
+  /* A seek starts at the new block's first edge, not the remainder of the
+     previous block's pulse that tape_stop() saved. */
+  if( !error ) next_tape_edge_tstates = 0;
+  return error;
 }
 
 /* Which block is current? */

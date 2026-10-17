@@ -587,13 +587,13 @@ else
 endif
 
 $(CORE_DIR)/fuse/config.h: $(CORE_DIR)/src/config_fuse.h
-	cp $(CORE_DIR)/src/config_fuse.h $(CORE_DIR)/fuse/config.h
+	$(if $(filter win,$(system_platform)),copy /Y "$(CORE_DIR)\\src\\config_fuse.h" "$(CORE_DIR)\\fuse\\config.h" >NUL,cp $(CORE_DIR)/src/config_fuse.h $(CORE_DIR)/fuse/config.h)
 
 $(CORE_DIR)/libspectrum/config.h: $(CORE_DIR)/src/config_libspectrum.h
-	cp $(CORE_DIR)/src/config_libspectrum.h $(CORE_DIR)/libspectrum/config.h
+	$(if $(filter win,$(system_platform)),copy /Y "$(CORE_DIR)\\src\\config_libspectrum.h" "$(CORE_DIR)\\libspectrum\\config.h" >NUL,cp $(CORE_DIR)/src/config_libspectrum.h $(CORE_DIR)/libspectrum/config.h)
 
 $(CORE_DIR)/src/version.c: FORCE
-	cat $(CORE_DIR)/etc/version.c.templ | sed s/HASH/`git rev-parse HEAD | tr -d "\n"`/g > $@
+	$(if $(filter win,$(system_platform)),copy /Y "$(CORE_DIR)\\etc\\version.c.templ" "$(CORE_DIR)\\src\\version.c" >NUL,cat $(CORE_DIR)/etc/version.c.templ | sed s/HASH/`git rev-parse HEAD | tr -d "\n"`/g > $@)
 
 clean-objs:
 	rm -f $(OBJS)

@@ -4,6 +4,7 @@
 #include <externs.h>
 #include <input.h>
 #include <ui/ui.h>
+#include <tapedeck.h>
 
 enum keyb_states {
    CAPS_SHIFT_PRESSED = 0x01,
@@ -134,6 +135,47 @@ int ui_event(void)
    else
    {
       select_pressed = false;
+   }
+
+   if (tapedeck_poll(input_state_cb))
+   {
+      unsigned id;
+      input_event_t release;
+      keyb_overlay = 0;
+      /* The deck owns navigation while open. Release keys that were held
+         when it opened so BASIC and games do not see stuck directions. */
+      for (port = 0; port < MAX_PADS; ++port)
+      {
+         for (id = 0; id < sizeof(map) / sizeof(map[0]); ++id)
+         {
+            bool keyboard_event;
+            input_key button;
+            if (!joyp_state[port][id]) continue;
+            joyp_state[port][id] = false;
+            button = translate(map[id], port, &keyboard_event);
+            if (button == INPUT_KEY_NONE) continue;
+            release.type = keyboard_event ? INPUT_EVENT_KEYRELEASE : INPUT_EVENT_JOYSTICK_RELEASE;
+            if (keyboard_event) {
+               release.types.key.native_key = button;
+               release.types.key.spectrum_key = button;
+            } else {
+               release.types.joystick.which = port;
+               release.types.joystick.button = button;
+            }
+            input_event(&release);
+         }
+      }
+      for (id = 0; keysyms_map[id].ui; ++id)
+      {
+         unsigned ui = keysyms_map[id].ui;
+         if (!keyb_state[ui]) continue;
+         keyb_state[ui] = false;
+         release.type = INPUT_EVENT_KEYRELEASE;
+         release.types.key.native_key = keysyms_map[id].fuse;
+         release.types.key.spectrum_key = keysyms_map[id].fuse;
+         input_event(&release);
+      }
+      return 0;
    }
 
    // Kempston Mouse: a single peripheral, read from whichever port (if any)

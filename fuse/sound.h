@@ -25,6 +25,9 @@
 #ifndef FUSE_SOUND_H
 #define FUSE_SOUND_H
 
+/* Match cassette input to the beeper level without changing tape pulses. */
+extern int sound_tape_boost;
+
 #include <libspectrum.h>
 
 void sound_register_startup( void );
