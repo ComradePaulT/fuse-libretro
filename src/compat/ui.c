@@ -137,7 +137,7 @@ int ui_event(void)
       select_pressed = false;
    }
 
-   if (tapedeck_poll(input_state_cb))
+   if (tapedeck_owns_input())
    {
       unsigned id;
       input_event_t release;

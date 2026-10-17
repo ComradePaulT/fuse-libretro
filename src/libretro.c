@@ -2860,7 +2860,6 @@ void retro_run(void)
       }
    }
 
-   total_time_ms += frame_time;
    show_frame = some_audio = 0;
 
    /*
@@ -2884,6 +2883,28 @@ void retro_run(void)
       consume one input sample per poll, so extra polls desync them.
       Reading state inside the loop via input_state_cb() remains fine. */
    input_poll_cb();
+   tapedeck_poll(input_state_cb);
+
+   if (tapedeck_poke_visible())
+   {
+      static const int16_t silence[2048] = { 0 };
+      static double pending_samples = 0.0;
+      unsigned samples;
+
+      /* Release keys previously sent to Fuse, then keep the machine on its
+         current frame. Libretro still needs one video and audio frame per
+         retro_run() while the POKE panel has focus. */
+      ui_event();
+      pending_samples += frame_time * 44.1;
+      samples = (unsigned)pending_samples;
+      pending_samples -= samples;
+      if (samples > 1024) samples = 1024;
+      audio_cb(silence, samples);
+      render_video();
+      return;
+   }
+
+   total_time_ms += frame_time;
 
    /* Bounded wait. some_audio is set by sound_lowlevel_frame(), reached only
       via sound_frame(), which returns early whenever sound_enabled is clear

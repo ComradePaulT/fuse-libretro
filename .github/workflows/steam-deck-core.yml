@@ -1,0 +1,26 @@
+name: Steam Deck core
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Linux x86-64 core
+        run: bash build-steam-deck.sh
+      - name: Verify libretro entry points
+        run: |
+          readelf -h fuse_libretro.so | grep -E 'Class:|Machine:'
+          nm -D fuse_libretro.so | grep ' retro_run$'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fuse-libretro-steam-deck
+          path: fuse_libretro.so
+          if-no-files-found: error

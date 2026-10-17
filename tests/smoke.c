@@ -9,11 +9,15 @@
 static unsigned frames, audio_frames, last_w, last_h;
 static uint16_t *last_frame;
 static unsigned key_f9, key_a, key_down, key_r3;
+static unsigned key_ctrl, key_m, key_tab, key_enter;
+static unsigned typed_key;
 static int test_auto_load;
 static int test_auto_play;
 static int test_show_deck;
 static int test_model_switch, model_128, variables_changed;
 static int test_m3u_tape;
+static int test_poke;
+static int test_poke_deck;
 static struct retro_disk_control_ext_callback disk_control;
 
 static bool env(unsigned cmd, void *data)
@@ -68,6 +72,11 @@ static int16_t input(unsigned port,unsigned device,unsigned index,unsigned id)
    (void)index;
    if (port) return 0;
    if (device==RETRO_DEVICE_KEYBOARD && id==RETROK_F9) return key_f9;
+   if (device==RETRO_DEVICE_KEYBOARD && id==RETROK_LCTRL) return key_ctrl;
+   if (device==RETRO_DEVICE_KEYBOARD && id==RETROK_m) return key_m;
+   if (device==RETRO_DEVICE_KEYBOARD && id==RETROK_TAB) return key_tab;
+   if (device==RETRO_DEVICE_KEYBOARD && id==RETROK_RETURN) return key_enter;
+   if (device==RETRO_DEVICE_KEYBOARD && id==typed_key) return typed_key!=0;
    if (device==RETRO_DEVICE_JOYPAD && id==RETRO_DEVICE_ID_JOYPAD_A) return key_a;
    if (device==RETRO_DEVICE_JOYPAD && id==RETRO_DEVICE_ID_JOYPAD_DOWN) return key_down;
    if (device==RETRO_DEVICE_JOYPAD && id==RETRO_DEVICE_ID_JOYPAD_R3) return key_r3;
@@ -105,7 +114,11 @@ int main(int argc,char **argv)
    void (*init)(void), (*run)(void), (*unload_game)(void), (*deinit)(void);
    void (*get_system_av_info)(struct retro_system_av_info *);
    bool (*load_game)(const struct retro_game_info *);
+   size_t (*serialize_size)(void);
+   bool (*serialize)(void *, size_t);
    FILE *file; long length; void *bytes; struct retro_game_info game={0};
+   void *poke_before=NULL, *poke_idle=NULL, *poke_after=NULL;
+   size_t poke_snapshot_size=0;
    int i;
    if(argc<4) return 2;
    test_auto_load=argc>4 && !strcmp(argv[4],"autoload");
@@ -113,6 +126,8 @@ int main(int argc,char **argv)
    test_show_deck=argc>4 && !strcmp(argv[4],"autoload_play_show");
    test_model_switch=argc>4 && !strcmp(argv[4],"switch_model");
    test_m3u_tape=argc>4 && !strcmp(argv[4],"m3u_tape");
+   test_poke=argc>4 && !strcmp(argv[4],"poke");
+   test_poke_deck=argc>4 && !strcmp(argv[4],"poke_deck");
    if (test_show_deck) test_auto_play=1;
    if (test_auto_play) test_auto_load=1;
    lib=LoadLibraryA(argv[1]); if(!lib) {printf("LoadLibrary error %lu\n",GetLastError());return 2;}
@@ -127,6 +142,7 @@ int main(int argc,char **argv)
    GET(get_system_av_info,void(*)(struct retro_system_av_info *));
    GET(load_game,bool(*)(const struct retro_game_info *));
    GET(unload_game,void(*)(void)); GET(deinit,void(*)(void));
+   GET(serialize_size,size_t(*)(void)); GET(serialize,bool(*)(void *,size_t));
 #undef GET
    file=fopen(argv[2],"rb"); if(!file)return 4;
    fseek(file,0,SEEK_END);length=ftell(file);rewind(file);
@@ -174,7 +190,42 @@ int main(int argc,char **argv)
       key_down=(i==25 && argc==4);
       key_a=(i==40 && !test_auto_load) ||
             (i==335 && test_auto_play); key_r3=0;
+      if (test_poke) {
+         static const char address[]="16384";
+         static const char value[]="42";
+         key_ctrl=key_m=i==5;
+         key_tab=i==20;
+         key_enter=i==26;
+         typed_key=0;
+         if (i>=10 && i<=18 && !(i&1)) typed_key=address[(i-10)/2];
+         if (i==22 || i==24) typed_key=value[(i-22)/2];
+         key_f9=key_a=key_down=0;
+      }
+      if (test_poke_deck) {
+         key_f9=i==5;
+         key_down=i==7 || i==9 || i==11;
+         key_a=i==13;
+      }
       run();
+      if (test_poke && i==23) {
+         poke_snapshot_size=serialize_size();
+         poke_idle=malloc(poke_snapshot_size);
+         if (!poke_idle || !serialize(poke_idle,poke_snapshot_size)) return 10;
+      }
+      if (test_poke && i==25) {
+         poke_before=malloc(poke_snapshot_size);
+         poke_after=malloc(poke_snapshot_size);
+         if (!poke_before || !poke_after ||
+             !serialize(poke_before,poke_snapshot_size)) return 10;
+         if (memcmp(poke_idle,poke_before,poke_snapshot_size)) {
+            puts("Spectrum advanced while POKE panel was open"); return 13;
+         }
+      }
+      if (test_poke && i==27 &&
+          (!serialize(poke_after,poke_snapshot_size) ||
+           !memcmp(poke_before,poke_after,poke_snapshot_size))) {
+         puts("POKE did not change paused machine state"); return 11;
+      }
       {
          unsigned produced=audio_frames-before_audio;
          if (produced<min_audio) min_audio=produced;
@@ -193,6 +244,15 @@ int main(int argc,char **argv)
       if (av.timing.fps < 50.0 || av.timing.fps > 50.03) return 7;
    }
    printf("frames=%u audio_samples=%u image=%ux%u\n",frames,audio_frames,last_w,last_h);
+   if (test_poke || test_poke_deck) {
+      if (!last_frame || last_w!=320 || last_h!=240 ||
+          last_frame[5*last_w+5]!=0xffe0) {
+         puts("Multiface panel not drawn at 320x240"); return 12;
+      }
+      puts(test_poke_deck ? "Multiface panel opened from Datacorder" :
+           "Multiface panel opened, paused Spectrum, applied POKE, and emitted audio");
+   }
    unload_game();deinit();free(bytes);free(last_frame);FreeLibrary(lib);
+   free(poke_before);free(poke_idle);free(poke_after);
    return frames>0 && audio_frames>0 && last_w>=256 && last_h>=192 ? 0:6;
 }
